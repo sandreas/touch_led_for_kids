@@ -1,31 +1,48 @@
 #include <Preferences.h>
 #include <Adafruit_NeoPixel.h>
-#include "WiFi.h"
-#include "driver/adc.h"
 #include "esp_sleep.h"
 #include "driver/gpio.h"
 #include "driver/rtc_io.h"
-
-
-
 
 // PINs
 #define TOUCH_SENSOR_PIN 2
 #define LED_RING_PIN 5
 #define INTERNAL_LED_PIN 8
 
-
-#define LED_RING_NUM_PIXELS 8
-#define LED_DEFAULT_BRIGHTNESS 10
+// hardware prerequesites
 #define SERIAL_BAUD_RATE 115200
+#define CPU_MHZ 80 // lower values than 80 (e.g. 40 or 20) result in white LED color as soon as touch is pressed
+#define LED_RING_NUM_PIXELS 8
 
-// deep sleep stuff
-#define WAKEUP_PIN 2
-RTC_DATA_ATTR int bootCount = 0;
-void print_wakeup_reason() {
+// Other default values
+#define LED_DEFAULT_BRIGHTNESS 10
+#define LED_MIN_BRIGHTNESS 2 // 0 is off and makes no sense and 1 is red only
+#define DOUBLE_CLICK_DELAY_MS 225 // 225ms is the usual max delay between taps that is recognized as double tap
 
-  Serial.printf("Boot number: %d\n", ++bootCount);
+Adafruit_NeoPixel pixels = Adafruit_NeoPixel(LED_RING_NUM_PIXELS, LED_RING_PIN, NEO_GRB + NEO_KHZ800);
+// int LED_DEFAULT_COLOR = pixels.Color(255, 167, 87);
+// int LED_DEFAULT_COLOR = pixels.Color(255, 142, 27);
+int LED_DEFAULT_COLOR = pixels.Color(230, 60, 0);
 
+// int LED_DEFAULT_COLOR = pixels.Color(255, 108 , 0); // 255, 108, 0
+
+// preferences
+Preferences preferences;
+unsigned long prefLastWrite = millis();
+int prefBrightness = LED_DEFAULT_BRIGHTNESS;
+
+// brightness
+int brightness = LED_DEFAULT_BRIGHTNESS;
+int brightnessModifier = 1;
+
+
+
+// the setup function runs once when you press reset or power the board
+void setup() {
+  initSerialBaudRate();
+  Serial.println("=== setup start");
+  Serial.printf("changed serial rate to %d\n", SERIAL_BAUD_RATE);
+  turnOffInternalLed();
   esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
 
   switch (wakeup_reason) {
@@ -41,7 +58,7 @@ void print_wakeup_reason() {
     case ESP_SLEEP_WAKEUP_TOUCHPAD:
       Serial.println("Wakeup caused by touchpad");
       break;
-    case ESP_SLEEP_WAKEUP_GPIO:  // 05 - this is used by ESP32-C3 as EXT0/EXT1 does not available in C3
+    case ESP_SLEEP_WAKEUP_GPIO:    // 05 - this is used by ESP32-C3 as EXT0/EXT1 does not available in C3
       Serial.println("Wakeup by GPIO");
       break;
     case ESP_SLEEP_WAKEUP_ULP:
@@ -49,45 +66,26 @@ void print_wakeup_reason() {
       break;
     default:
       Serial.printf("Wakeup was not caused by deep sleep: %d\n", wakeup_reason);
+      loadPreferences();
+      // disableWifi(); // do not use, see https://www.youtube.com/watch?v=JFDiqPHw3Vc
+      updateLedsToDefaultValues();
       break;
   }
+
+  // enableGpioWakeUp();
+  Serial.println("=== setup end");
 }
 
-
-
-Adafruit_NeoPixel pixels = Adafruit_NeoPixel(LED_RING_NUM_PIXELS, LED_RING_PIN, NEO_GRB + NEO_KHZ800);
-int LED_DEFAULT_COLOR = pixels.Color(255, 108, 0);
-
-
-
-Preferences preferences;
-unsigned long prefLastWrite = millis();
-int prefBrightness = LED_DEFAULT_BRIGHTNESS;
-
-
-int brightness = LED_DEFAULT_BRIGHTNESS;
-int brightnessModifier = 1;
-
-
-
-// the setup function runs once when you press reset or power the board
-void setup() {
-  Serial.println("=== setup start");
-  initSerialBaudRate();
-  loadPreferences();
-  turnOffInternalLed();
-  // disableWifi(); // do not use, see https://www.youtube.com/watch?v=JFDiqPHw3Vc
-   // will turn off wifi automatically (see https://www.youtube.com/watch?v=JFDiqPHw3Vc)
-  setLedDefaults();
-  enableGpioWakeUp();
-  Serial.println("=== setup end");
+void initSerialBaudRate() {
+  Serial.begin(SERIAL_BAUD_RATE);
+  delay(100);
 }
 
 void loadPreferences() {
   preferences.begin("settings", false);  // false = read/write
   prefBrightness = preferences.getInt("brightness", LED_DEFAULT_BRIGHTNESS);
   brightness = prefBrightness;
-  Serial.printf("prefBrightness is %d\n", prefBrightness);
+  Serial.printf("loaded brightness from preferences: %d\n", prefBrightness);
   preferences.end();
 }
 
@@ -109,29 +107,14 @@ void writePreferences() {
 }
 
 
-void initSerialBaudRate() {
-  Serial.printf("setting serial to %d\n", SERIAL_BAUD_RATE);
-  Serial.begin(SERIAL_BAUD_RATE);
-}
+
 void turnOffInternalLed() {
   Serial.println("turning off internal led...");
   pinMode(INTERNAL_LED_PIN, OUTPUT);
   digitalWrite(INTERNAL_LED_PIN, HIGH);  // turn the LED on (HIGH is the voltage level)
 }
 
-void setWifiSleep() {
-  Serial.println("setting wifi sleep to save battery...");
-  WiFi.setSleep(true);
-  // Serial.printf("WiFi-Sleep: %d \n",WiFi.getSleep());
-}
-
-void disableWifi() {
-  // adc_power_off();
-  WiFi.disconnect(true);  // Disconnect from the network
-  WiFi.mode(WIFI_OFF);    // Switch WiFi off
-}
-
-void updateLedStatus(uint8_t brightness, uint32_t color /*, uint32_t delayms*/) {
+void updateLedBrightnessAndColor(uint8_t brightness, uint32_t color /*, uint32_t delayms*/) {
   for (int i = 0; i < LED_RING_NUM_PIXELS; i++) {
     // pixels.setPixelBrightness()
     pixels.setBrightness(brightness);
@@ -145,54 +128,55 @@ void updateLedStatus(uint8_t brightness, uint32_t color /*, uint32_t delayms*/) 
   }
 }
 void blinkLeds() {
-  updateLedStatus(0, LED_DEFAULT_COLOR);
+  updateLedBrightnessAndColor(0, LED_DEFAULT_COLOR);
   delay(100);
-  updateLedStatus(100, LED_DEFAULT_COLOR);
+  updateLedBrightnessAndColor(100, LED_DEFAULT_COLOR);
   delay(100);
-  updateLedStatus(0, LED_DEFAULT_COLOR);
+  updateLedBrightnessAndColor(0, LED_DEFAULT_COLOR);
   delay(100);
-  updateLedStatus(brightness, LED_DEFAULT_COLOR);
+  updateLedBrightnessAndColor(brightness, LED_DEFAULT_COLOR);
 }
 
 
-void setLedDefaults() {
+void updateLedsToDefaultValues() {
   Serial.printf("setting default LED status - brightness: %d, color: %#08x\n", LED_DEFAULT_BRIGHTNESS, LED_DEFAULT_COLOR);
-  updateLedStatus(brightness, LED_DEFAULT_COLOR);
+  updateLedBrightnessAndColor(brightness, LED_DEFAULT_COLOR);
 }
 
-void setBrightnessValue(int newBrightness) {
-  if (newBrightness < 0) {
-    newBrightness = 0;
+void updateLedBrightness(int newBrightness) {
+  if (newBrightness < LED_MIN_BRIGHTNESS) {
+    newBrightness = LED_MIN_BRIGHTNESS;
   }
   if (newBrightness > 255) {
     newBrightness = 255;
   }
 
-  if (newBrightness >= 0 && newBrightness <= 255) {
+  if (newBrightness >= LED_MIN_BRIGHTNESS && newBrightness <= 255) {
     brightness = newBrightness;
-    updateLedStatus(brightness, LED_DEFAULT_COLOR);
+    updateLedBrightnessAndColor(brightness, LED_DEFAULT_COLOR);
   }
 }
 
-void changeBrightness(int modifier) {
-  Serial.printf("changeBrightness: %d\n", modifier);
+void updateRelativeLedBrightness(int modifier) {
   int newBrightness = brightness += modifier;
-  setBrightnessValue(newBrightness);
+    Serial.printf("updateRelativeLedBrightness: %d (result: %d)\n", modifier, newBrightness);
+
+  updateLedBrightness(newBrightness);
 }
 
-void toggleBrightness() {
-  if (brightness <= 0) {
+void alternateLedBrightness() {
+  if (brightness <= LED_MIN_BRIGHTNESS) {
     brightnessModifier = 1;
   } else if (brightness >= 255) {
     brightnessModifier = -1;
   }
-  changeBrightness(brightnessModifier);
+  updateRelativeLedBrightness(brightnessModifier);
 }
 
 
 
 
-
+/*
 const gpio_num_t buttonPin1 = GPIO_NUM_2;  // GPIO for pushbutton 1
 int wakeup_gpio;
 
@@ -202,8 +186,7 @@ void IRAM_ATTR handleInterrupt1() {
 }
 
 void enableGpioWakeUp() {
-  
-  // esp_deep_sleep_enable_gpio_wakeup(1 << WAKEUP_PIN, ESP_GPIO_WAKEUP_GPIO_LOW);
+  // esp_deep_sleep_enable_gpio_wakeup(1 << TOUCH_SENSOR_PIN, ESP_GPIO_WAKEUP_GPIO_LOW);
 
   gpio_wakeup_enable(buttonPin1, GPIO_INTR_LOW_LEVEL);  // Trigger wake-up on high level
   esp_err_t result = esp_sleep_enable_gpio_wakeup();
@@ -213,22 +196,21 @@ void enableGpioWakeUp() {
     Serial.println("Failed to set GPIO Wake-Up as wake-up source.");
   }
 
-  delay(5000);
+  delay(2000);
 
-  /*
-    #define RISING    0x01
-#define FALLING   0x02
-#define CHANGE    0x03
-#define ONLOW     0x04
-#define ONHIGH    0x05
-#define ONLOW_WE  0x0C
-#define ONHIGH_WE 0x0D
-    */
+  
+// #define RISING    0x01
+// #define FALLING   0x02
+// #define CHANGE    0x03
+// #define ONLOW     0x04
+// #define ONHIGH    0x05
+// #define ONLOW_WE  0x0C
+// #define ONHIGH_WE 0x0D
+    
   attachInterrupt(digitalPinToInterrupt(buttonPin1), handleInterrupt1, CHANGE);
 }
+*/
 
-
-// ISR for buttonPin1
 
 
 int currentTouchState = LOW;
@@ -245,6 +227,7 @@ unsigned long lastReport = millis();
 void loop() {
   unsigned long now = millis();
 
+
   currentTouchState = digitalRead(TOUCH_SENSOR_PIN);
   touchActive = currentTouchState == HIGH;
 
@@ -260,7 +243,7 @@ void loop() {
   currentTouchStateDurationMs = millis() - lastTouchStateChangeMs;
 
 
-  if (currentTouchStateDurationMs > 250 && (touchCount > 0 || touchActive)) {
+  if (currentTouchStateDurationMs > 225 && (touchCount > 0 || touchActive)) {
     Serial.printf("touch action: touchCount: %d, touchActive: %d, touchSkipNextRelease: %d\n", touchCount, touchActive, touchSkipNextRelease);
 
     if (touchActive) {
@@ -270,37 +253,35 @@ void loop() {
 
       switch (touchCount) {
         case 2:
-          changeBrightness(-1);
+          updateRelativeLedBrightness(-1);
           break;
         case 1:
-          changeBrightness(1);
+          updateRelativeLedBrightness(1);
           break;
         default:
-          toggleBrightness();
+          alternateLedBrightness();
           break;
       }
+      delay(5);
     } else {
       switch (touchCount) {
         case 5:
           writePreferences();
           break;
         case 4:
-          setBrightnessValue(120);
+          updateLedBrightness(10);
           break;
         case 3:
-          setBrightnessValue(10);
+          updateLedBrightness(prefBrightness);
           break;
         case 2:
-          changeBrightness(5);
+          updateRelativeLedBrightness(-5);
           break;
         default:
-          changeBrightness(-5);
+          updateRelativeLedBrightness(5);
           break;
       }
     }
-    // make touch actions more intuitive
-    // delay(25);
-
 
     // reset state after processed touch event
     if (touchActive) {
@@ -312,8 +293,30 @@ void loop() {
   }
 
 
+
   unsigned long idleTimeMs = now - lastTouchStateChangeMs;
-  unsigned long fallAsleepAfterMs = 30 * 1000;
+  unsigned long fallAsleepAfterMs = 15 * 1000;
+
+  if (idleTimeMs > fallAsleepAfterMs) {
+    int currentFreq = getCpuFrequencyMhz();
+    if(currentFreq != CPU_MHZ) {
+      Serial.printf("setCpuFrequencyMhz: %d\n", CPU_MHZ);
+      setCpuFrequencyMhz(CPU_MHZ); // save battery
+    }
+  }
+
+  if (idleTimeMs > 30*1000) {
+    Serial.printf("Going to sleep, to be wakeup by GPIO %d\n", TOUCH_SENSOR_PIN);
+    delay(3000);
+
+    // deep sleep works, but dimms the LED brightness (probably because of GPIO volage change)
+    esp_deep_sleep_enable_gpio_wakeup(1 << TOUCH_SENSOR_PIN, ESP_GPIO_WAKEUP_GPIO_LOW);
+    esp_deep_sleep_start();
+
+    // this does not allow wakeup although it has been explicitely allowed
+    // esp_sleep_enable_gpio_wakeup();
+    // esp_light_sleep_start();
+  }
 
 /*
   unsigned long timeSinceLastReport = millis() - lastReport;
@@ -322,24 +325,15 @@ void loop() {
     lastReport = millis();
   }
 */
-  if (idleTimeMs > fallAsleepAfterMs) {
-    int currentFreq = getCpuFrequencyMhz();
-
-    if(currentFreq != 20) {
-      Serial.printf("setting cpu to 20mhz: current %d\n", currentFreq);
-      // setCpuFrequencyMhz(20);
-    }
-    // this will disable wifi and save battery
-  }
 
   // Serial.printf("idleTimeMs: %d, fallAsleepAfterMs: %d\n", idleTimeMs, fallAsleepAfterMs);
   /*
   if (idleTimeMs > fallAsleepAfterMs) {
-    Serial.printf("Going to sleep, to be wakeup by GPIO %d\n", WAKEUP_PIN);
+    Serial.printf("Going to sleep, to be wakeup by GPIO %d\n", TOUCH_SENSOR_PIN);
     delay(3000);
 
     // deep sleep works, but dimms the LED brightness (probably because of GPIO volage change)
-    // esp_deep_sleep_enable_gpio_wakeup(1 << WAKEUP_PIN, ESP_GPIO_WAKEUP_GPIO_LOW);
+    // esp_deep_sleep_enable_gpio_wakeup(1 << TOUCH_SENSOR_PIN, ESP_GPIO_WAKEUP_GPIO_LOW);
     // esp_deep_sleep_start();
 
     // this does not allow wakeup although it has been explicitely allowed
